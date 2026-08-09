@@ -1,3 +1,25 @@
+
+Important — Local Use Only
+
+Summary / Warning
+
+This scanner watches a local uploads folder, loads and runs YARA rules against detected files, and reads system logs (e.g., /var/log/auth.log). Because it executes scanning logic, may require elevated privileges, and can contain sensitive detection rules, run it only on machines you control (development or isolated analysis hosts). Do not deploy this to public servers, shared production systems, or untrusted environments.
+Why this matters
+
+Access to system logs and elevated privileges can expose sensitive data or create security risks if the host is shared.
+Private YARA rules may include sensitive patterns or intellectual property — do not commit them to public repos.
+Scanning untrusted files can trigger or interact with malware; keep testing confined to isolated environments.
+Recommendations
+
+Only run the script on a local or isolated VM that you fully control.
+Review the code and any YARA rules before running.
+Store private rule files outside source control and add them to .gitignore.
+Restrict rule file and findings.ndjson permissions (e.g., chmod 600).
+Prefer running as a non-root user; use sudo only when absolutely necessary and understand the implications.
+If you need to share rules between machines, use secure channels (SFTP/SSH, private artifact stores, or a secrets manager).
+Test safely: create a dedicated test uploads folder and a harmless test file (e.g., containing the trigger string) to verify behavior.
+If you want, I can add this as a new "Security & Local Use Warning" section to README.md and commit it for you — tell me to proceed.
+
 use this SOC Detector (YARA Scanner):
 
 1. Prerequisites
