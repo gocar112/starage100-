@@ -1,0 +1,16 @@
+version: "3.8"
+services:
+  scanner:
+    build: .
+    image: soc-yara-scanner:latest
+    container_name: soc-yara-scanner
+    restart: unless-stopped
+    environment:
+      - WATCH_DIRECTORY=/app/uploads
+      - YARA_RULES_FILE=/app/rules/test_rule.yar
+      - AUTH_LOG_PATH=/var/log/auth.log
+      - FINDINGS_FILE=/app/findings.ndjson
+    volumes:
+      - ./uploads:/app/uploads:rw
+      - ./findings.ndjson:/app/findings.ndjson:rw
+      - /var/log/auth.log:/var/log/auth.log:ro
