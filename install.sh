@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# install.sh — Automatic installer for SOC YARA Scanner Docker setup
-# Usage: chmod +x install.sh && ./install.sh
+# install.sh — Automatic installer/uninstaller for SOC YARA Scanner Docker setup
+# Usage: chmod +x install.sh && ./install.sh [install|uninstall]
 #
 set -euo pipefail
 IFS=$'\n\t'
@@ -9,6 +9,7 @@ IFS=$'\n\t'
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_NAME="soc-yara-scanner:latest"
 COMPOSE_FILE="${REPO_ROOT}/docker-compose.yml"
+CONTAINER_NAME="soc-yara-scanner"
 
 # Helpers
 echo_stderr() { printf '%s\n' "$*" >&2; }
@@ -378,7 +379,7 @@ maybe_run_container() {
       echo "Started via 'docker-compose up -d'"
     else
       echo "docker-compose not available. Starting single container via docker run..."
-      docker run -d --name soc-yara-scanner \
+      docker run -d --name "${CONTAINER_NAME}" \
         -v "${REPO_ROOT}/uploads":/app/uploads:rw \
         -v "${REPO_ROOT}/findings.ndjson":/app/findings.ndjson:rw \
         -v /var/log/auth.log:/var/log/auth.log:ro \
@@ -390,25 +391,137 @@ maybe_run_container() {
   fi
 }
 
+# Uninstall functions
+stop_container() {
+  if ! check_cmd docker; then
+    echo "Docker not available; skipping container stop."
+    return 0
+  fi
+
+  echo "Stopping and removing containers..."
+  
+  # Try docker-compose first
+  if [ -f "${COMPOSE_FILE}" ] && docker compose version >/dev/null 2>&1; then
+    echo "Stopping via 'docker compose down'..."
+    docker compose down 2>/dev/null || true
+  elif [ -f "${COMPOSE_FILE}" ] && check_cmd docker-compose; then
+    echo "Stopping via 'docker-compose down'..."
+    docker-compose down 2>/dev/null || true
+  else
+    # Stop and remove manually
+    if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+      echo "Stopping container ${CONTAINER_NAME}..."
+      docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+      echo "Removing container ${CONTAINER_NAME}..."
+      docker rm "${CONTAINER_NAME}" 2>/dev/null || true
+    else
+      echo "Container ${CONTAINER_NAME} not found."
+    fi
+  fi
+}
+
+remove_image() {
+  if ! check_cmd docker; then
+    echo "Docker not available; skipping image removal."
+    return 0
+  fi
+
+  if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${IMAGE_NAME}$"; then
+    if prompt_yesno "Remove Docker image ${IMAGE_NAME}?" "Y"; then
+      echo "Removing Docker image..."
+      docker rmi "${IMAGE_NAME}" 2>/dev/null || echo "Note: Image may be in use; remove manually with: docker rmi ${IMAGE_NAME}"
+    fi
+  else
+    echo "Docker image ${IMAGE_NAME} not found."
+  fi
+}
+
+remove_generated_files() {
+  if prompt_yesno "Remove generated files (Dockerfile, docker-compose.yml, etc.)?" "N"; then
+    echo "Removing generated files..."
+    rm -f "${REPO_ROOT}/Dockerfile" && echo "Removed Dockerfile"
+    rm -f "${REPO_ROOT}/docker-compose.yml" && echo "Removed docker-compose.yml"
+    rm -f "${REPO_ROOT}/requirements.txt" && echo "Removed requirements.txt"
+    rm -f "${REPO_ROOT}/YARA_scanning.py" && echo "Removed YARA_scanning.py"
+    
+    if [ -d "${REPO_ROOT}/rules" ]; then
+      rm -rf "${REPO_ROOT}/rules" && echo "Removed rules directory"
+    fi
+    
+    if [ -d "${REPO_ROOT}/uploads" ]; then
+      rm -rf "${REPO_ROOT}/uploads" && echo "Removed uploads directory"
+    fi
+  else
+    echo "Keeping generated files."
+  fi
+}
+
+remove_findings() {
+  if prompt_yesno "Remove findings.ndjson file?" "N"; then
+    rm -f "${REPO_ROOT}/findings.ndjson" && echo "Removed findings.ndjson"
+  else
+    echo "Keeping findings.ndjson."
+  fi
+}
+
+uninstall() {
+  echo "=== SOC YARA Scanner Uninstaller ==="
+  echo "This will remove the Docker container, image, and optionally generated files."
+  echo
+
+  stop_container
+  echo
+  remove_image
+  echo
+  remove_findings
+  echo
+  remove_generated_files
+
+  echo
+  echo "Uninstall complete."
+  echo "To reinstall, run: ./install.sh"
+}
+
 # Main flow
-echo "Starting installer..."
-create_files
+main() {
+  local action="${1:-}"
 
-if ! ensure_docker; then
-  echo "Docker not present. Exiting installer after file creation."
-  exit 0
-fi
+  case "$action" in
+    uninstall|remove)
+      uninstall
+      ;;
+    install|"")
+      echo "Starting installer..."
+      create_files
 
-ensure_docker_compose || true
+      if ! ensure_docker; then
+        echo "Docker not present. Exiting installer after file creation."
+        exit 0
+      fi
 
-if prompt_yesno "Build the Docker image now?" "Y"; then
-  build_image
-fi
+      ensure_docker_compose || true
 
-maybe_docker_login_and_push || true
-maybe_run_container
+      if prompt_yesno "Build the Docker image now?" "Y"; then
+        build_image
+      fi
 
-echo "Installer finished. Next steps:"
-echo " - To check logs: docker logs -f soc-yara-scanner"
-echo " - To stop: docker stop soc-yara-scanner && docker rm soc-yara-scanner"
-echo " - To rebuild after edits: ./install.sh (choose build when prompted)"
+      maybe_docker_login_and_push || true
+      maybe_run_container
+
+      echo
+      echo "Installer finished. Next steps:"
+      echo " - To check logs: docker logs -f ${CONTAINER_NAME}"
+      echo " - To stop: docker stop ${CONTAINER_NAME} && docker rm ${CONTAINER_NAME}"
+      echo " - To rebuild after edits: ./install.sh"
+      echo " - To uninstall: ./install.sh uninstall"
+      ;;
+    *)
+      echo "Usage: $0 [install|uninstall]"
+      echo "  install    - Install and set up the SOC YARA Scanner (default)"
+      echo "  uninstall  - Remove containers, images, and optionally generated files"
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
