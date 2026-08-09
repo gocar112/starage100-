@@ -1,0 +1,169 @@
+Short summary
+A lightweight Python YARA scanner that watches an uploads directory, scans new files with yara-python, correlates detections with recent failed SSH auth events from /var/log/auth.log, and writes structured alerts to findings.ndjson. It’s a simple CLI watcher intended for SOC/IR workflows (test rule matches the word "malware").
+
+Docker setup — step‑by‑step guide
+
+What the container will do
+- Run YARA_scanning.py continuously.
+- Use a host-mounted uploads/ directory for incoming files.
+- Persist findings.ndjson to a host location.
+- Optionally read host /var/log (or /var/log/auth.log) to correlate failed SSH logins.
+
+Files you’ll create
+- Dockerfile
+- docker-compose.yml (optional, recommended)
+- requirements.txt (lists yara-python and any other Python deps)
+- .env (optional, to set WATCH_DIRECTORY, YARA_RULES_FILE, AUTH_LOG_PATH)
+
+1) Add requirements.txt
+Create requirements.txt next to YARA_scanning.py:
+```
+yara-python
+```
+(If your script uses other packages, add them here.)
+
+2) Create Dockerfile
+Create a file named Dockerfile in the repository root with this content:
+
+```
+FROM python:3.11-slim
+
+# Install system dependencies needed to build/install yara-python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    pkg-config \
+    libyara-dev \
+    python3-dev \
+    ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy app files
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the scanner and any rule files
+COPY YARA_scanning.py .
+COPY rules/ rules/   # optional: if you will include a rules/ directory with .yar files
+
+# Create default uploads dir inside container
+RUN mkdir -p /app/uploads
+
+# Expose nothing (this is a local scanner). Run as root to allow reading host logs if mounted.
+ENV WATCH_DIRECTORY=/app/uploads
+ENV YARA_RULES_FILE=/app/rules/compiled_rules.yar   # update if you use a different path
+ENV AUTH_LOG_PATH=/var/log/auth.log
+ENV FINDINGS_FILE=/app/findings.ndjson
+
+CMD ["python", "YARA_scanning.py"]
+```
+
+Notes:
+- libyara-dev and build-essential let pip install yara-python.
+- The container runs the script as root by default (this is required if you need to read /var/log/auth.log on many hosts). Consider the security implications.
+
+3) Optional: docker-compose.yml for easy run
+Create docker-compose.yml to mount host paths and set restart policy:
+
+```
+version: "3.8"
+services:
+  scanner:
+    build: .
+    image: soc-yara-scanner:latest
+    container_name: soc-yara-scanner
+    restart: unless-stopped
+    environment:
+      - WATCH_DIRECTORY=/app/uploads
+      - YARA_RULES_FILE=/app/rules/compiled_rules.yar
+      - AUTH_LOG_PATH=/var/log/auth.log
+      - FINDINGS_FILE=/app/findings.ndjson
+    volumes:
+      - ./uploads:/app/uploads:rw
+      - ./findings.ndjson:/app/findings.ndjson:rw
+      # Mount host auth log (read-only). You may mount the whole /var/log if preferred:
+      - /var/log/auth.log:/var/log/auth.log:ro
+      # - /var/log:/var/log:ro
+    # If your host uses SELinux, use :z or :Z on volumes
+    # security_opt: - seccomp:unconfined   # only if needed for certain syscalls
+```
+
+4) Build the Docker image
+From the repo root:
+```
+docker build -t soc-yara-scanner .
+```
+Or using docker-compose:
+```
+docker compose build
+```
+
+5) Run the container
+Simple docker run (bind mounts):
+```
+mkdir -p ./uploads
+touch ./findings.ndjson
+
+docker run -d --name soc-yara-scanner \
+  -v $(pwd)/uploads:/app/uploads:rw \
+  -v $(pwd)/findings.ndjson:/app/findings.ndjson:rw \
+  -v /var/log/auth.log:/var/log/auth.log:ro \
+  --restart unless-stopped \
+  soc-yara-scanner
+```
+Or with docker-compose:
+```
+docker compose up -d
+```
+
+6) Test the scanner
+On the host:
+```
+echo "this is malware" > ./uploads/test.txt
+# Wait a few seconds for the watcher to pick up the file
+cat findings.ndjson
+```
+You should see an appended JSON/ndjson entry for the detection (depending on the script’s output format).
+
+7) Permissions & Troubleshooting
+- Reading /var/log/auth.log:
+  - If you mount /var/log/auth.log into the container, the container process still needs sufficient permission to read the file. Running the container as the default root user should work.
+  - If the host uses restrictive permissions or SELinux, you may need to run with additional flags (SELinux context :z) or mount the entire /var/log with appropriate options.
+- If pip install yara-python fails:
+  - Ensure apt packages installed in Dockerfile include libyara-dev, pkg-config, and build-essential.
+  - Check Python version compatibility; adjust base image to python:3.10-slim if necessary.
+- If you prefer not to run as root:
+  - Mount auth.log into a directory accessible to the non-root user and change file ownership on the host, or configure the host to provide the required log access via a dedicated read-only user or a log-collector sidecar.
+
+8) Optional improvements
+- Use a non-polling watcher: add watchdog to requirements and update YARA_scanning.py to use filesystem events (lower CPU).
+- Add a small script to compile YARA rules into a single compiled file and COPY it into the image (or mount rules/).
+- Forward detections to a SIEM: add environment variables for syslog/HTTP endpoint and modify the script to POST alerts.
+- Add healthcheck to Dockerfile or docker-compose to verify container is running and scanning.
+
+Minimal example: Docker + test run
+1. Create Dockerfile + requirements.txt as above.
+2. Build: docker build -t soc-yara-scanner .
+3. Prepare host dirs: mkdir uploads; touch findings.ndjson
+4. Run:
+   docker run -it --rm \
+     -v $(pwd)/uploads:/app/uploads \
+     -v $(pwd)/findings.ndjson:/app/findings.ndjson \
+     -v /var/log/auth.log:/var/log/auth.log:ro \
+     soc-yara-scanner
+5. Test:
+   echo "this is malware" > uploads/test.txt
+   sleep 2
+   cat findings.ndjson
+
+Security considerations (brief)
+- Mounting host /var/log into a container and running as root can expose sensitive logs — limit scope (mount only auth.log) and restrict container network access if needed.
+- If the container runs as root, harden it (read-only filesystem where possible, drop capabilities).
+- Do not run untrusted rules in a high-privilege container.
+
+If you want, I can:
+- Generate the Dockerfile and docker-compose.yml files for you and show them as ready-to-copy file blocks.
+- Add a sample rules/ directory and a small compile script so the image includes compiled rules.
+- Update YARA_scanning.py to use watchdog for events and to accept env vars for configuration (I can edit the script and provide a patch). Which of these would you like next?
